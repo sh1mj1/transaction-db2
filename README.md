@@ -1026,3 +1026,175 @@ public class TxService {
 **데이터베이스**
 
 - 데이터베이스에 따라 읽기 전용 트랜잭션의 경우 읽기만 하면 되므로, 내부에서 성능 최적화가 발생합니다.
+
+# 예외와 트랜잭션 커밋, 롤백 - 기본
+
+예외가 발생했는데, 내부에서 예외를 처리하지 못하고, 트랜잭션 범위(`@Transactional`가 적용된 AOP) 바깥으로 예외를 던지면 어떻게 해야 할까요?
+
+예외 발생시 스프링 트랜잭션 AOP는 **예외의 종류에 따라 트랜잭션을 커밋하거나 롤백**합니다.
+
+![https://user-images.githubusercontent.com/52024566/205658158-8650af5e-4aff-417b-8c71-e392451b657a.png](https://user-images.githubusercontent.com/52024566/205658158-8650af5e-4aff-417b-8c71-e392451b657a.png)
+
+- 언체크 예외인 `RuntimeException`, `Error`와 그 하위 예외가 발생하면 트랜잭션을 롤백합니다.
+- 체크 예외인 `Exception`과 그 하위 예외가 발생하면 트랜잭션을 커밋합니다.
+- 물론 정상 응답(리턴)하면 트랜잭션을 커밋합니다.
+
+`RollbackTest`
+
+```java
+@SpringBootTest
+public class RollbackTest {
+  
+    @Autowired
+    RollbackService service;
+  
+    @Test
+    void runtimeException() {
+        assertThatThrownBy(() -> service.runtimeException())
+          .isInstanceOf(RuntimeException.class);
+    }
+  
+    @Test
+    void checkedException() {
+        assertThatThrownBy(() -> service.checkedException())
+          .isInstanceOf(MyException.class);
+    }
+  
+    @Test
+    void rollbackFor() {
+          assertThatThrownBy(() -> service.rollbackFor())
+            .isInstanceOf(MyException.class);
+    }
+  
+    @TestConfiguration
+    static class RollbackTestConfig {
+        @Bean
+        RollbackService rollbackService() {
+            return new RollbackService();
+        }
+    }
+  
+    @Slf4j
+    static class RollbackService {
+      
+        //런타임 예외 발생: 롤백
+        @Transactional
+        public void runtimeException() {
+            log.info("call runtimeException");
+            throw new RuntimeException();
+        }
+      
+        //체크 예외 발생: 커밋
+        @Transactional
+        public void checkedException() throws MyException {
+            log.info("call checkedException");
+            throw new MyException();
+        }
+      
+        //체크 예외 rollbackFor 지정: 롤백
+        @Transactional(rollbackFor = MyException.class)
+        public void rollbackFor() throws MyException {
+            log.info("call rollbackFor");
+            throw new MyException();
+        }
+    }
+  
+    static class MyException extends Exception {
+    }
+}
+```
+
+이렇게 하면 트랜잭션이 커밋되었는지 롤백 되었는지 로그로 확인할 수 있습니다.
+
+`application.properties`
+
+```java
+logging.level.org.springframework.transaction.interceptor=TRACE
+logging.level.org.springframework.jdbc.datasource.DataSourceTransactionManager=DEBUG
+
+#JPA log
+logging.level.org.springframework.orm.jpa.JpaTransactionManager=DEBUG
+logging.level.org.hibernate.resource.transaction=DEBUG
+```
+
+참고로 지금은 JPA를 사용하므로 트랜잭션 매니저로 `JpaTransactionManager` 가 실행되고, 여기의 로그를 출력합니다.
+
+`runtimeException()` 실행 - 런타임 예외
+
+```java
+//런타임 예외 발생: 롤백
+@Transactional
+public void runtimeException() {
+    log.info("call runtimeException");
+    throw new RuntimeException();
+}
+```
+
+`RuntimeException`이 발생하므로 트랜잭션이 롤백됩니다.
+
+**실행 결과**
+
+```java
+Getting transaction for [...RollbackService.runtimeException]
+call runtimeException
+Completing transaction for [...RollbackService.runtimeException] after exception: RuntimeException
+Initiating transaction rollback
+Rolling back JPA transaction on EntityManager
+```
+
+`checkedException()` 실행 - 체크 예외
+
+```java
+//체크 예외 발생: 커밋
+@Transactional
+public void checkedException() throws MyException {
+    log.info("call checkedException");
+    throw new MyException();
+}
+```
+
+`MyException`은 `Exception`을 상속받은 체크 예외입니다. 따라서 예외가 발생해도 트랜잭션이 커밋됩니다.
+
+**실행 결과**
+
+```java
+Getting transaction for [...RollbackService.checkedException]
+call checkedException
+Completing transaction for [...RollbackService.checkedException] after exception: MyException
+Initiating transaction commit
+Committing JPA transaction on EntityManager
+```
+
+`rollbackFor` 
+
+이 옵션을 사용하면 기본 정책에 추가로 어떤 예외가 발생할 때 롤백할 지 지정할 수 있습니다.
+
+`@Transactional(rollbackFor = Exception.class)`
+
+이렇게 지정하면 체크 예외인 `Exception` 이 발생해도 커밋하지 않고 롤백합니다. (자식 타입도 롤백합니다.)
+
+`rollbackFor()` 실행 - 체크 예외를 강제로 롤백
+
+```java
+//체크 예외 rollbackFor 지정: 롤백
+@Transactional(rollbackFor = MyException.class)
+public void rollbackFor() throws MyException {
+    log.info("call rollbackFor");
+    throw new MyException();
+}
+```
+
+기본 정책과 무관하게 특정 예외를 강제로 롤백하고 싶으면 `rollbackFor`를 사용하면 됩니다. (해당 예외의 자식도 포함)
+
+`rollbackFor = MyException.class`을 지정했기 때문에 `MyException`이 발생하면 체크 예외이지만 트랜잭션이 롤백됩니다.
+
+**실행 결과**
+
+```java
+Getting transaction for [...RollbackService.rollbackFor]
+call rollbackFor
+Completing transaction for [...RollbackService.rollbackFor] after exception: MyException
+Initiating transaction rollback
+Rolling back JPA transaction on EntityManager
+```
+
